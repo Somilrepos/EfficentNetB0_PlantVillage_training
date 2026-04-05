@@ -378,7 +378,10 @@ def main():
         device = torch.device(f"cuda:{gpu_ids[0]}")
         torch.cuda.set_device(device)
         parallel_enabled = args.multi_gpu and len(gpu_ids) > 1
-        vprint(verbose, f"[DEVICE] available CUDA devices: {len(torch.cuda.device_count()) if torch.cuda.is_available() else 0}")
+        vprint(
+            verbose,
+            f"[DEVICE] available CUDA devices: {torch.cuda.device_count() if torch.cuda.is_available() else 0}",
+        )
         vprint(verbose, f"[DEVICE] selected device {device}")
         if parallel_enabled:
             vprint(verbose, f"[DEVICE] DataParallel enabled on {gpu_ids}")
