@@ -542,11 +542,7 @@ def main():
             {
                 "epoch": epoch + 1,
                 "model_state_dict": model.module.state_dict() if hasattr(model, "module") else model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": scheduler.state_dict(),
                 "classes": classes,
-                "val_loss": val_loss,
-                "val_accs": val_accs,
                 "best_final_acc": best_final_acc,
                 "multi_gpu": parallel_enabled,
             },
