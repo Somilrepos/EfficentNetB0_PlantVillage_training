@@ -14,12 +14,12 @@ from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
 
 
 class ExitHead(nn.Module):
-    def __init__(self, num_classes: int, dropout: float = 0.0):
+    def __init__(self, in_channels: int, num_classes: int, dropout: float = 0.0):
         super().__init__()
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.flatten = nn.Flatten()
         self.dropout = nn.Dropout(dropout)
-        self.fc = nn.LazyLinear(num_classes)
+        self.fc = nn.Linear(in_channels, num_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.pool(x)
@@ -43,7 +43,7 @@ class EarlyExitEfficientNetB0(nn.Module):
 
     This is a practical mapping for the Stage 4 / Stage 5 / Stage 7 plan.
     """
-    def __init__(self, num_classes: int, pretrained: bool = True):
+    def __init__(self, num_classes: int, pretrained: bool = True, sample_size: int = 224):
         super().__init__()
 
         weights = EfficientNet_B0_Weights.IMAGENET1K_V1 if pretrained else None
@@ -57,10 +57,18 @@ class EarlyExitEfficientNetB0(nn.Module):
         self.block3 = nn.Sequential(*feats[6:8])  # up to third early exit
         self.block4 = nn.Sequential(*feats[8:])   # final feature block
 
-        # Channel sizes for torchvision EfficientNet-B0 at these points
-        self.exit1 = ExitHead(num_classes=num_classes, dropout=0.0)
-        self.exit2 = ExitHead(num_classes=num_classes, dropout=0.0)
-        self.exit3 = ExitHead(num_classes=num_classes, dropout=0.0)
+        with torch.no_grad():
+            dummy = torch.zeros(1, 3, sample_size, sample_size)
+            ex1 = self.block1(dummy)
+            ex2 = self.block2(ex1)
+            ex3 = self.block3(ex2)
+            c1 = ex1.shape[1]
+            c2 = ex2.shape[1]
+            c3 = ex3.shape[1]
+
+        self.exit1 = ExitHead(in_channels=c1, num_classes=num_classes, dropout=0.0)
+        self.exit2 = ExitHead(in_channels=c2, num_classes=num_classes, dropout=0.0)
+        self.exit3 = ExitHead(in_channels=c3, num_classes=num_classes, dropout=0.0)
 
         # Reuse the official final head structure
         final_in = base.classifier[1].in_features
@@ -399,7 +407,11 @@ def main():
     vprint(verbose, f"[DATA] classes={classes}")
 
     vprint(verbose, "[MODEL] building EarlyExitEfficientNetB0")
-    model = EarlyExitEfficientNetB0(num_classes=num_classes, pretrained=args.pretrained).to(device)
+    model = EarlyExitEfficientNetB0(
+        num_classes=num_classes,
+        pretrained=args.pretrained,
+        sample_size=args.image_size,
+    ).to(device)
 
     if parallel_enabled:
         model = nn.DataParallel(model)
