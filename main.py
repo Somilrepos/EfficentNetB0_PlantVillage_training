@@ -28,6 +28,122 @@ class ExitHead(nn.Module):
         return self.fc(x)
 
 
+def _count_conv2d_flops(module: nn.Conv2d, inp: torch.Tensor, out: torch.Tensor) -> float:
+    batch_size = out.shape[0]
+    out_channels = out.shape[1]
+    out_h = out.shape[2]
+    out_w = out.shape[3]
+    kernel_ops = module.kernel_size[0] * module.kernel_size[1] * (module.in_channels / module.groups)
+    output_elements = batch_size * out_channels * out_h * out_w
+    bias_ops = 1 if module.bias is not None else 0
+    return float(output_elements * (2.0 * kernel_ops + bias_ops))
+
+
+def _count_linear_flops(module: nn.Linear, inp: torch.Tensor, out: torch.Tensor) -> float:
+    batch_size = out.shape[0]
+    add_ops = 1 if module.bias is not None else 0
+    return float(batch_size * module.in_features * (2 * module.out_features + add_ops))
+
+
+def _module_flops(module: nn.Module, inp: torch.Tensor, out: torch.Tensor) -> float:
+    if isinstance(module, nn.Conv2d):
+        return _count_conv2d_flops(module, inp, out)
+    if isinstance(module, nn.Linear):
+        return _count_linear_flops(module, inp, out)
+    if isinstance(module, (nn.BatchNorm2d, nn.BatchNorm1d)):
+        return float(out.numel() * 2)
+    if isinstance(module, (nn.ReLU, nn.ReLU6, nn.SiLU, nn.Sigmoid, nn.GELU, nn.Hardswish, nn.LeakyReLU)):
+        return float(out.numel())
+    return 0.0
+
+
+def _run_with_flops(modules: List[nn.Module], inp: torch.Tensor) -> Tuple[torch.Tensor, float]:
+    hooks = []
+    module_flops: List[float] = [0.0]
+
+    def _hook(module: nn.Module, module_in: Tuple[torch.Tensor], module_out: torch.Tensor):
+        x = module_in[0]
+        y = module_out
+        if isinstance(y, (tuple, list)):
+            y = y[0]
+        if not torch.is_tensor(y):
+            return
+        if not torch.is_tensor(x):
+            return
+        if not x.is_floating_point():
+            return
+        module_flops[0] += _module_flops(module, x, y)
+
+    for mod in modules:
+        for layer in mod.modules():
+            if layer is mod:
+                continue
+            if len(list(layer.children())) > 0:
+                continue
+            hooks.append(layer.register_forward_hook(_hook))
+
+    with torch.no_grad():
+        out = inp
+        for mod in modules:
+            out = mod(out)
+
+    for hook in hooks:
+        hook.remove()
+
+    return out, module_flops[0]
+
+
+def _format_flops(flops: float) -> str:
+    if flops >= 1_000_000_000:
+        return f"{flops / 1_000_000_000:.2f} GFLOPs"
+    if flops >= 1_000_000:
+        return f"{flops / 1_000_000:.2f} MFLOPs"
+    if flops >= 1_000:
+        return f"{flops / 1_000:.2f} KFLOPs"
+    return f"{flops:.0f} FLOPs"
+
+
+def print_exit_flops(model: nn.Module, sample_size: int = 224, device: torch.device = torch.device("cpu")):
+    model = model.eval()
+    sample = torch.randn(1, 3, sample_size, sample_size, device=device)
+
+    if hasattr(model, "block1"):
+        cum_flops = 0.0
+        x, f = _run_with_flops([model.block1], sample)
+        cum_flops += f
+        _, f = _run_with_flops([model.exit1], x)
+        cum_flops += f
+        exit1_flops = cum_flops
+
+        x, f = _run_with_flops([model.block2], x)
+        cum_flops += f
+        _, f = _run_with_flops([model.exit2], x)
+        cum_flops += f
+        exit2_flops = cum_flops
+
+        x, f = _run_with_flops([model.block3], x)
+        cum_flops += f
+        _, f = _run_with_flops([model.exit3], x)
+        cum_flops += f
+        exit3_flops = cum_flops
+
+        x, f = _run_with_flops([model.block4, model.avgpool], x)
+        cum_flops += f
+        x = torch.flatten(x, 1)
+        classifier_seq = nn.Sequential(model.classifier)
+        _, f = _run_with_flops([model.classifier], x)
+        cum_flops += f
+        final_flops = cum_flops
+
+        print("[FLOPS] cumulative FLOPs per exit:")
+        print(f"  Exit 1: {_format_flops(exit1_flops)}")
+        print(f"  Exit 2: {_format_flops(exit2_flops)}")
+        print(f"  Exit 3: {_format_flops(exit3_flops)}")
+        print(f"  Final: {_format_flops(final_flops)}")
+    else:
+        print("[FLOPS] model does not expose early-exit blocks; unable to compute per-exit FLOPs.")
+
+
 class EarlyExitEfficientNetB0(nn.Module):
     """
     3 early exits + 1 final classifier.
@@ -447,6 +563,7 @@ def main():
         pretrained=args.pretrained,
         sample_size=args.image_size,
     ).to(device)
+    print_exit_flops(model, sample_size=args.image_size, device=device)
 
     if parallel_enabled:
         model = nn.DataParallel(model)
