@@ -580,6 +580,8 @@ def main():
     final_checkpoint = str(save_path.with_name(f"{save_path.stem}_final{save_path.suffix}"))
     last_epoch_acc = 0.0
     cumulative_train_time = 0.0
+    ckpt_dir = save_path.parent
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(args.epochs):
         vprint(verbose, f"[TRAIN] starting epoch {epoch + 1}/{args.epochs}")
@@ -627,6 +629,21 @@ def main():
                 },
                 args.save_path,
             )
+        epoch_ckpt = ckpt_dir / f"{save_path.stem}_epoch_{epoch+1:03d}{save_path.suffix}"
+        torch.save(
+            {
+                "epoch": epoch + 1,
+                "model_state_dict": model.module.state_dict() if hasattr(model, "module") else model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "classes": classes,
+                "val_loss": val_loss,
+                "val_accs": val_accs,
+                "best_final_acc": best_final_acc,
+                "multi_gpu": parallel_enabled,
+            },
+            str(epoch_ckpt),
+        )
 
     torch.save(
         {
