@@ -102,20 +102,33 @@ def multi_exit_loss(
 
     assert len(outputs) == len(weights)
 
-    losses = [F.cross_entropy(out, targets) for out in outputs]
-    total = sum(w * l for w, l in zip(weights, losses))
-    return total, [l.item() for l in losses]
+        losses = [F.cross_entropy(out, targets) for out in outputs]
+        total = sum(w * l for w, l in zip(weights, losses))
+        return total, [l.item() for l in losses]
+
+
+def vprint(enabled: bool, msg: str):
+    if enabled:
+        print(msg)
 
 
 @torch.no_grad()
-def evaluate(model: nn.Module, loader: DataLoader, device: torch.device):
+def evaluate(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    verbose: bool = False,
+    log_every: int = 25,
+):
     model.eval()
 
     correct = [0, 0, 0, 0]
     total = 0
     loss_sum = 0.0
+    running_correct = [0, 0, 0, 0]
+    running_total = 0
 
-    for images, targets in loader:
+    for step, (images, targets) in enumerate(loader):
         images = images.to(device)
         targets = targets.to(device)
 
@@ -124,20 +137,41 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device):
         loss_sum += loss.item() * images.size(0)
 
         total += targets.size(0)
+        running_total += targets.size(0)
         for i, out in enumerate(outputs):
             preds = out.argmax(dim=1)
             correct[i] += (preds == targets).sum().item()
+            running_correct[i] += (preds == targets).sum().item()
+
+        if verbose and running_total > 0 and (step + 1) % max(1, log_every) == 0:
+            batch_accs = [c / running_total for c in running_correct]
+            vprint(
+                verbose,
+                f"  [EVAL] step={step+1}/{len(loader)} "
+                f"batch_loss={loss.item():.4f} "
+                f"accs={batch_accs[0]:.4f},{batch_accs[1]:.4f},{batch_accs[2]:.4f},{batch_accs[3]:.4f}",
+            )
+            running_total = 0
+            running_correct = [0, 0, 0, 0]
 
     accs = [c / total for c in correct]
+    vprint(verbose, f"  [EVAL] completed: samples={total}, loss={loss_sum / total:.4f}, accs={accs}")
     return loss_sum / total, accs
 
 
-def train_one_epoch(model, loader, optimizer, device):
+def train_one_epoch(
+    model,
+    loader,
+    optimizer,
+    device: torch.device,
+    verbose: bool = False,
+    log_every: int = 25,
+):
     model.train()
     running_loss = 0.0
     total = 0
 
-    for images, targets in loader:
+    for step, (images, targets) in enumerate(loader):
         images = images.to(device)
         targets = targets.to(device)
 
@@ -149,6 +183,12 @@ def train_one_epoch(model, loader, optimizer, device):
 
         running_loss += loss.item() * images.size(0)
         total += images.size(0)
+
+        if verbose and (step + 1) % max(1, log_every) == 0:
+            vprint(
+                True,
+                f"  [TRAIN] step={step+1}/{len(loader)} running_loss={running_loss / total:.4f}",
+            )
 
     return running_loss / total
 
@@ -167,6 +207,7 @@ def make_loaders(
     num_workers: int = 4,
     pin_memory: bool = True,
     seed: int = 42,
+    verbose: bool = False,
 ):
     rng = random.Random(seed)
 
@@ -175,7 +216,7 @@ def make_loaders(
     std = weights.transforms().std
 
     train_tfms = transforms.Compose([
-        transforms.Resize   ((image_size, image_size)),
+        transforms.Resize((image_size, image_size)),
         transforms.RandomHorizontalFlip(),
         transforms.RandomRotation(15),
         transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
@@ -189,7 +230,12 @@ def make_loaders(
         transforms.Normalize(mean=mean, std=std),
     ])
 
+    vprint(verbose, f"[DATA] loading dataset from {data_root}")
     full_ds = datasets.ImageFolder(data_root)
+    vprint(verbose, f"[DATA] found {len(full_ds)} files, {len(full_ds.classes)} classes")
+    for cls_idx, cls_name in enumerate(full_ds.classes):
+        cls_count = sum(1 for _, target in full_ds.samples if target == cls_idx)
+        vprint(verbose, f"[DATA] class={cls_name} count={cls_count}")
     class_to_indices: Dict[int, List[int]] = {}
     for idx, target in enumerate(full_ds.targets):
         if target not in class_to_indices:
@@ -211,6 +257,10 @@ def make_loaders(
         train_indices.extend(inds[:n_train])
         val_indices.extend(inds[n_train : n_train + n_val])
         test_indices.extend(inds[n_train + n_val :])
+        vprint(
+            verbose,
+            f"[SPLIT] class={full_ds.classes[target]} -> total={n}, train={n_train}, val={n_val}, test={n-n_train-n_val}",
+        )
 
     train_ds = datasets.ImageFolder(data_root, transform=train_tfms)
     eval_ds = datasets.ImageFolder(data_root, transform=val_tfms)
@@ -240,6 +290,7 @@ def make_loaders(
         pin_memory=pin_memory,
     )
 
+    vprint(verbose, f"[DATA] train={len(train_indices)} val={len(val_indices)} test={len(test_indices)}")
     return train_loader, val_loader, test_loader, full_ds.classes
 
 
@@ -255,6 +306,9 @@ def parse_args():
     parser.add_argument("--num-workers", type=int, default=4, help="DataLoader worker processes.")
     parser.add_argument("--pin-memory", action="store_true", help="Enable pin_memory in DataLoader.")
     parser.add_argument("--no-pin-memory", action="store_true", help="Disable pin_memory in DataLoader.")
+    parser.add_argument("--verbose", action="store_true", default=True, help="Enable verbose logging.")
+    parser.add_argument("--quiet", action="store_true", help="Disable verbose logging.")
+    parser.add_argument("--log-every", type=int, default=25, help="Log every N batches when verbose.")
     parser.add_argument("--pretrained", action="store_true", default=True, help="Use ImageNet pretrained EfficientNet-B0.")
     parser.add_argument("--not-pretrained", action="store_false", dest="pretrained", help="Disable pretrained backbone.")
     parser.add_argument("--gpus", type=str, default="", help="Comma-separated CUDA device indices to use, e.g. '0,1'.")
@@ -278,7 +332,12 @@ def select_visible_gpus(gpus: str) -> List[int]:
 
 def main():
     args = parse_args()
+    verbose = args.verbose and not args.quiet
+    if args.quiet:
+        args.verbose = False
     set_seed(args.seed)
+    vprint(verbose, f"[SETUP] args={vars(args)}")
+    vprint(verbose, f"[SEED] set to {args.seed}")
 
     if args.no_pin_memory:
         pin_memory = False
@@ -289,6 +348,7 @@ def main():
     if args.disable_cuda or not torch.cuda.is_available():
         device = torch.device("cpu")
         parallel_enabled = False
+        vprint(verbose, "[DEVICE] using CPU")
     else:
         if args.gpus:
             os.environ["CUDA_VISIBLE_DEVICES"] = args.gpus
@@ -298,6 +358,10 @@ def main():
         device = torch.device(f"cuda:{gpu_ids[0]}")
         torch.cuda.set_device(device)
         parallel_enabled = args.multi_gpu and len(gpu_ids) > 1
+        vprint(verbose, f"[DEVICE] available CUDA devices: {len(torch.cuda.device_count()) if torch.cuda.is_available() else 0}")
+        vprint(verbose, f"[DEVICE] selected device {device}")
+        if parallel_enabled:
+            vprint(verbose, f"[DEVICE] DataParallel enabled on {gpu_ids}")
 
     train_loader, val_loader, test_loader, classes = make_loaders(
         args.data_root,
@@ -306,16 +370,21 @@ def main():
         num_workers=args.num_workers,
         pin_memory=pin_memory and torch.cuda.is_available(),
         seed=args.seed,
+        verbose=verbose,
     )
     num_classes = len(classes)
+    vprint(verbose, f"[DATA] classes={classes}")
 
+    vprint(verbose, "[MODEL] building EarlyExitEfficientNetB0")
     model = EarlyExitEfficientNetB0(num_classes=num_classes, pretrained=args.pretrained).to(device)
 
     if parallel_enabled:
         model = nn.DataParallel(model)
-        print(f"Using DataParallel across {len(gpu_ids)} CUDA devices: {gpu_ids}")
-        print(f"Using first device as anchor: {device}")
+        vprint(verbose, f"Using DataParallel across {len(gpu_ids)} CUDA devices: {gpu_ids}")
+        vprint(verbose, f"Using first device as anchor: {device}")
 
+    vprint(verbose, f"[TRAIN] optimizer=AdamW(lr={args.lr}, weight_decay={args.weight_decay})")
+    vprint(verbose, f"[TRAIN] scheduler=CosineAnnealingLR(T_max={args.epochs})")
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
@@ -325,8 +394,23 @@ def main():
     last_epoch_acc = 0.0
 
     for epoch in range(args.epochs):
-        train_loss = train_one_epoch(model, train_loader, optimizer, device)
-        val_loss, val_accs = evaluate(model, val_loader, device)
+        vprint(verbose, f"[TRAIN] starting epoch {epoch + 1}/{args.epochs}")
+        train_loss = train_one_epoch(
+            model,
+            train_loader,
+            optimizer,
+            device,
+            verbose=verbose,
+            log_every=args.log_every,
+        )
+        vprint(verbose, f"[VAL] evaluating epoch {epoch + 1}/{args.epochs}")
+        val_loss, val_accs = evaluate(
+            model,
+            val_loader,
+            device,
+            verbose=verbose,
+            log_every=args.log_every,
+        )
         last_epoch_acc = val_accs[3]
         scheduler.step()
 
@@ -360,10 +444,11 @@ def main():
         },
         final_checkpoint,
     )
+    vprint(verbose, f"[CHECKPOINT] saved final checkpoint to {final_checkpoint}")
 
     print(f"Best final accuracy: {best_final_acc:.4f}")
 
-    test_loss, test_accs = evaluate(model, test_loader, device)
+    test_loss, test_accs = evaluate(model, test_loader, device, verbose=verbose, log_every=args.log_every)
     print(
         f"Final test | "
         f"test_loss={test_loss:.4f} | "
