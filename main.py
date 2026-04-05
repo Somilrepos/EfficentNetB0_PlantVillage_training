@@ -13,12 +13,12 @@ from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
 
 
 class ExitHead(nn.Module):
-    def __init__(self, in_channels: int, num_classes: int, dropout: float = 0.0):
+    def __init__(self, num_classes: int, dropout: float = 0.0):
         super().__init__()
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.flatten = nn.Flatten()
         self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(in_channels, num_classes)
+        self.fc = nn.LazyLinear(num_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.pool(x)
@@ -57,9 +57,9 @@ class EarlyExitEfficientNetB0(nn.Module):
         self.block4 = nn.Sequential(*feats[8:])   # final feature block
 
         # Channel sizes for torchvision EfficientNet-B0 at these points
-        self.exit1 = ExitHead(in_channels=40, num_classes=num_classes, dropout=0.2)
-        self.exit2 = ExitHead(in_channels=80, num_classes=num_classes, dropout=0.2)
-        self.exit3 = ExitHead(in_channels=192, num_classes=num_classes, dropout=0.2)
+        self.exit1 = ExitHead(num_classes=num_classes, dropout=0.0)
+        self.exit2 = ExitHead(num_classes=num_classes, dropout=0.0)
+        self.exit3 = ExitHead(num_classes=num_classes, dropout=0.0)
 
         # Reuse the official final head structure
         final_in = base.classifier[1].in_features
