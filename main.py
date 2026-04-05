@@ -102,9 +102,15 @@ def multi_exit_loss(
 
     assert len(outputs) == len(weights)
 
-        losses = [F.cross_entropy(out, targets) for out in outputs]
-        total = sum(w * l for w, l in zip(weights, losses))
-        return total, [l.item() for l in losses]
+    losses = []
+    for out in outputs:
+        losses.append(F.cross_entropy(out, targets))
+
+    total = 0.0
+    for w, loss in zip(weights, losses):
+        total += w * loss
+
+    return total, [loss.item() for loss in losses]
 
 
 def vprint(enabled: bool, msg: str):
