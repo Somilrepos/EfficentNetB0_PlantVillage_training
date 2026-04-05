@@ -1,6 +1,7 @@
 import os
 import argparse
 import random
+import time
 from pathlib import Path
 from typing import List, Tuple, Dict
 
@@ -118,6 +119,13 @@ def vprint(enabled: bool, msg: str):
         print(msg)
 
 
+def format_time(seconds: float) -> str:
+    seconds = float(seconds)
+    minutes, secs = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
 @torch.no_grad()
 def evaluate(
     model: nn.Module,
@@ -176,6 +184,7 @@ def train_one_epoch(
     model.train()
     running_loss = 0.0
     total = 0
+    start = time.perf_counter()
 
     for step, (images, targets) in enumerate(loader):
         images = images.to(device)
@@ -191,12 +200,17 @@ def train_one_epoch(
         total += images.size(0)
 
         if verbose and (step + 1) % max(1, log_every) == 0:
+            now = time.perf_counter()
+            elapsed = now - start
             vprint(
-                True,
-                f"  [TRAIN] step={step+1}/{len(loader)} running_loss={running_loss / total:.4f}",
+                verbose,
+                f"  [TRAIN] step={step+1}/{len(loader)} running_loss={running_loss / total:.4f} "
+                f"throughput={total / max(1e-9, elapsed):.1f} img/s "
+                f"elapsed={format_time(elapsed)}",
             )
 
-    return running_loss / total
+    epoch_time = time.perf_counter() - start
+    return running_loss / total, epoch_time
 
 
 def set_seed(seed: int):
@@ -398,10 +412,11 @@ def main():
     save_path = Path(args.save_path)
     final_checkpoint = str(save_path.with_name(f"{save_path.stem}_final{save_path.suffix}"))
     last_epoch_acc = 0.0
+    cumulative_train_time = 0.0
 
     for epoch in range(args.epochs):
         vprint(verbose, f"[TRAIN] starting epoch {epoch + 1}/{args.epochs}")
-        train_loss = train_one_epoch(
+        train_loss, epoch_train_time = train_one_epoch(
             model,
             train_loader,
             optimizer,
@@ -409,6 +424,10 @@ def main():
             verbose=verbose,
             log_every=args.log_every,
         )
+        cumulative_train_time += epoch_train_time
+        remaining_epochs = args.epochs - (epoch + 1)
+        avg_epoch_time = cumulative_train_time / float(epoch + 1)
+        eta_seconds = avg_epoch_time * remaining_epochs
         vprint(verbose, f"[VAL] evaluating epoch {epoch + 1}/{args.epochs}")
         val_loss, val_accs = evaluate(
             model,
@@ -422,6 +441,9 @@ def main():
 
         print(
             f"Epoch {epoch+1}/{args.epochs} | "
+            f"epoch_time={format_time(epoch_train_time)} | "
+            f"elapsed_train={format_time(cumulative_train_time)} | "
+            f"eta={format_time(eta_seconds)} | "
             f"train_loss={train_loss:.4f} | val_loss={val_loss:.4f} | "
             f"exit1={val_accs[0]:.4f} exit2={val_accs[1]:.4f} "
             f"exit3={val_accs[2]:.4f} final={val_accs[3]:.4f}"
