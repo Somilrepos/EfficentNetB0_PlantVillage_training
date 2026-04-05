@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
-from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
+from torchvision.models import efficientnet_b0
 
 
 class ExitHead(nn.Module):
@@ -105,15 +105,21 @@ def multi_exit_loss(
     outputs: List[torch.Tensor],
     targets: torch.Tensor,
     weights: List[float] = None,
+    class_weights: torch.Tensor | None = None,
 ) -> Tuple[torch.Tensor, List[float]]:
     if weights is None:
         weights = [0.25, 0.25, 0.25, 0.25]
 
     assert len(outputs) == len(weights)
+    if class_weights is not None:
+        class_weights = class_weights.to(device=targets.device)
 
     losses = []
     for out in outputs:
-        losses.append(F.cross_entropy(out, targets))
+        if class_weights is not None:
+            losses.append(F.cross_entropy(out, targets, weight=class_weights))
+        else:
+            losses.append(F.cross_entropy(out, targets))
 
     total = 0.0
     for w, loss in zip(weights, losses):
@@ -139,6 +145,7 @@ def evaluate(
     model: nn.Module,
     loader: DataLoader,
     device: torch.device,
+    class_weights: torch.Tensor | None = None,
     verbose: bool = False,
     log_every: int = 25,
 ):
@@ -155,7 +162,7 @@ def evaluate(
         targets = targets.to(device)
 
         outputs = model(images)
-        loss, _ = multi_exit_loss(outputs, targets)
+        loss, _ = multi_exit_loss(outputs, targets, class_weights=class_weights)
         loss_sum += loss.item() * images.size(0)
 
         total += targets.size(0)
@@ -186,6 +193,7 @@ def train_one_epoch(
     loader,
     optimizer,
     device: torch.device,
+    class_weights: torch.Tensor | None = None,
     verbose: bool = False,
     log_every: int = 25,
 ):
@@ -200,7 +208,7 @@ def train_one_epoch(
 
         optimizer.zero_grad()
         outputs = model(images)
-        loss, _ = multi_exit_loss(outputs, targets)
+        loss, _ = multi_exit_loss(outputs, targets, class_weights=class_weights)
         loss.backward()
         optimizer.step()
 
@@ -239,23 +247,19 @@ def make_loaders(
 ):
     rng = random.Random(seed)
 
-    weights = EfficientNet_B0_Weights.IMAGENET1K_V1
-    mean = weights.transforms().mean
-    std = weights.transforms().std
-
     train_tfms = transforms.Compose([
-        transforms.Resize((image_size, image_size)),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(15),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+        transforms.Resize(256),
+        transforms.RandomResizedCrop(image_size, scale=(0.8, 1.0)),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.RandomRotation(30),
+        transforms.ColorJitter(brightness=0.2),
         transforms.ToTensor(),
-        transforms.Normalize(mean=mean, std=std),
     ])
 
     val_tfms = transforms.Compose([
-        transforms.Resize((image_size, image_size)),
+        transforms.Resize(256),
+        transforms.CenterCrop(image_size),
         transforms.ToTensor(),
-        transforms.Normalize(mean=mean, std=std),
     ])
 
     data_root = Path(data_root)
@@ -350,8 +354,27 @@ def make_loaders(
         pin_memory=pin_memory,
     )
 
+    train_targets = [full_ds.targets[i] for i in train_indices]
+    num_classes = len(full_ds.classes)
+    total_train = len(train_targets)
+    if total_train == 0:
+        raise ValueError("No samples in training split.")
+    class_counts = [0 for _ in range(num_classes)]
+    for t in train_targets:
+        class_counts[t] += 1
+
+    class_weights = []
+    for c, count in enumerate(class_counts):
+        if count <= 0:
+            vprint(verbose, f"[WARN] class={full_ds.classes[c]} has 0 train samples; class weight set to 0.")
+            class_weights.append(0.0)
+        else:
+            class_weights.append(total_train / (num_classes * count))
+    class_weights = torch.tensor(class_weights, dtype=torch.float32)
+
     vprint(verbose, f"[DATA] train={len(train_indices)} val={len(val_indices)} test={len(test_indices)}")
-    return train_loader, val_loader, test_loader, full_ds.classes
+    vprint(verbose, f"[DATA] class weights={class_weights.tolist()}")
+    return train_loader, val_loader, test_loader, full_ds.classes, class_weights
 
 
 def parse_args():
@@ -429,7 +452,7 @@ def main():
         if parallel_enabled:
             vprint(verbose, f"[DEVICE] DataParallel enabled on {gpu_ids}")
 
-    train_loader, val_loader, test_loader, classes = make_loaders(
+    train_loader, val_loader, test_loader, classes, class_weights = make_loaders(
         args.data_root,
         image_size=args.image_size,
         batch_size=args.batch_size,
@@ -471,6 +494,7 @@ def main():
             train_loader,
             optimizer,
             device,
+            class_weights=class_weights,
             verbose=verbose,
             log_every=args.log_every,
         )
@@ -483,6 +507,7 @@ def main():
             model,
             val_loader,
             device,
+            class_weights=class_weights,
             verbose=verbose,
             log_every=args.log_every,
         )
@@ -526,7 +551,14 @@ def main():
 
     print(f"Best final accuracy: {best_final_acc:.4f}")
 
-    test_loss, test_accs = evaluate(model, test_loader, device, verbose=verbose, log_every=args.log_every)
+    test_loss, test_accs = evaluate(
+        model,
+        test_loader,
+        device,
+        class_weights=class_weights,
+        verbose=verbose,
+        log_every=args.log_every,
+    )
     print(
         f"Final test | "
         f"test_loss={test_loss:.4f} | "
