@@ -258,8 +258,14 @@ def make_loaders(
         transforms.Normalize(mean=mean, std=std),
     ])
 
+    data_root = Path(data_root)
+    if not data_root.exists():
+        raise FileNotFoundError(f"data_root does not exist: {data_root}")
+
     vprint(verbose, f"[DATA] loading dataset from {data_root}")
     full_ds = datasets.ImageFolder(data_root)
+    if len(full_ds.classes) == 0:
+        raise ValueError(f"No class subdirectories found in data_root: {data_root}")
     vprint(verbose, f"[DATA] found {len(full_ds)} files, {len(full_ds.classes)} classes")
     for cls_idx, cls_name in enumerate(full_ds.classes):
         cls_count = sum(1 for _, target in full_ds.samples if target == cls_idx)
@@ -279,15 +285,41 @@ def make_loaders(
         rng.shuffle(inds)
 
         n = len(inds)
-        n_train = int(0.70 * n)
-        n_val = int(0.15 * n)
+        if n == 1:
+            n_train, n_val, n_test = 1, 0, 0
+        elif n == 2:
+            n_train, n_val, n_test = 1, 1, 0
+        else:
+            n_train = int(0.70 * n)
+            n_val = int(0.15 * n)
+            n_test = n - n_train - n_val
+
+            if n_val == 0:
+                n_val = 1
+            if n_test == 0:
+                if n_train > 1:
+                    n_train -= 1
+                else:
+                    n_val -= 1
+                n_test = 1
+
+            while n_train + n_val + n_test > n:
+                if n_test > 1:
+                    n_test -= 1
+                elif n_val > 1:
+                    n_val -= 1
+                else:
+                    n_train -= 1
+
+            while n_train + n_val + n_test < n:
+                n_train += 1
 
         train_indices.extend(inds[:n_train])
         val_indices.extend(inds[n_train : n_train + n_val])
         test_indices.extend(inds[n_train + n_val :])
         vprint(
             verbose,
-            f"[SPLIT] class={full_ds.classes[target]} -> total={n}, train={n_train}, val={n_val}, test={n-n_train-n_val}",
+            f"[SPLIT] class={full_ds.classes[target]} -> total={n}, train={n_train}, val={n_val}, test={n_test}",
         )
 
     train_ds = datasets.ImageFolder(data_root, transform=train_tfms)
@@ -332,13 +364,19 @@ def parse_args():
     parser.add_argument("--image-size", type=int, default=224, help="Input image resize dimension.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed used for reproducible stratified split.")
     parser.add_argument("--num-workers", type=int, default=4, help="DataLoader worker processes.")
-    parser.add_argument("--pin-memory", action="store_true", help="Enable pin_memory in DataLoader.")
-    parser.add_argument("--no-pin-memory", action="store_true", help="Disable pin_memory in DataLoader.")
-    parser.add_argument("--verbose", action="store_true", default=True, help="Enable verbose logging.")
-    parser.add_argument("--quiet", action="store_true", help="Disable verbose logging.")
+    pin_args = parser.add_mutually_exclusive_group()
+    pin_args.add_argument("--pin-memory", action="store_true", help="Enable pin_memory in DataLoader.")
+    pin_args.add_argument("--no-pin-memory", action="store_false", dest="pin_memory", help="Disable pin_memory in DataLoader.")
+    parser.set_defaults(pin_memory=True)
+    verbosity = parser.add_mutually_exclusive_group()
+    verbosity.add_argument("--verbose", action="store_true", help="Enable verbose logging.")
+    verbosity.add_argument("--quiet", action="store_true", help="Disable verbose logging.")
+    parser.set_defaults(verbose=True)
     parser.add_argument("--log-every", type=int, default=25, help="Log every N batches when verbose.")
-    parser.add_argument("--pretrained", action="store_true", default=True, help="Use ImageNet pretrained EfficientNet-B0.")
-    parser.add_argument("--not-pretrained", action="store_false", dest="pretrained", help="Disable pretrained backbone.")
+    pretrained = parser.add_mutually_exclusive_group()
+    pretrained.add_argument("--pretrained", action="store_true", help="Use ImageNet pretrained EfficientNet-B0.")
+    pretrained.add_argument("--not-pretrained", action="store_false", dest="pretrained", help="Disable pretrained backbone.")
+    parser.set_defaults(pretrained=True)
     parser.add_argument("--gpus", type=str, default="", help="Comma-separated CUDA device indices to use, e.g. '0,1'.")
     parser.add_argument("--multi-gpu", action="store_true", help="Enable DataParallel when multiple GPUs are available.")
     parser.add_argument("--save-path", type=str, default="early_exit_efficientnet_b0_plantvillage.pt", help="Checkpoint output path.")
@@ -367,10 +405,7 @@ def main():
     vprint(verbose, f"[SETUP] args={vars(args)}")
     vprint(verbose, f"[SEED] set to {args.seed}")
 
-    if args.no_pin_memory:
-        pin_memory = False
-    else:
-        pin_memory = bool(args.pin_memory)
+    pin_memory = bool(args.pin_memory)
 
     gpu_ids = select_visible_gpus(args.gpus)
     if args.disable_cuda or not torch.cuda.is_available():
